@@ -36,18 +36,45 @@ function sync_folder_read_statistics()
   $args = array(
     'post_type'      => 'attachment',
     'posts_per_page' => -1,
-    'meta_query'     => array(
-      array(
-        'key'     => 'guid',
-        'value'   => '%' . $folder . '%',
-        'compare' => 'LIKE',
-      ),
-    ),
   );
   $query = new WP_Query($args);
-  $total_synced_files = $query->found_posts;
+
+  $total_synced_files = 0;
+  foreach ($query->posts as $post) {
+    $file_path = get_attached_file($post->ID);
+    if (strpos($file_path, $folder_path) !== false) {
+      $total_synced_files++;
+    }
+  }
+
+  update_option('sync_folder_total_files_found', $total_files_found);
+  update_option('sync_folder_total_matching_files', $total_matching_files);
+  update_option('sync_folder_total_synced_files', $total_synced_files);
 
   return array($total_files_found, $total_matching_files, $total_synced_files);
+}
+
+function is_variant($folder, $filename)
+{
+  $base_filename = pathinfo($filename, PATHINFO_FILENAME); // Obtiene el nombre del archivo sin la extensión.
+  $files = glob($folder . $base_filename . '*'); // Busca archivos que comiencen con el nombre base.
+
+  // Si encuentra más de un archivo que comience con el nombre base, asume que hay variantes.
+  return count($files) > 1;
+}
+
+function find_attachment_by_url($url)
+{
+  global $wpdb;
+
+  // Buscar el archivo adjunto en la base de datos por su URL.
+  $attachment_id = $wpdb->get_var($wpdb->prepare("SELECT ID FROM $wpdb->posts WHERE guid LIKE %s AND post_type = 'attachment'", '%' . $wpdb->esc_like($url) . '%'));
+
+  if ($attachment_id) {
+    return get_post($attachment_id); // Si encuentra el archivo adjunto, devuelve el objeto del post.
+  }
+
+  return false; // Si no encuentra el archivo adjunto, devuelve false.
 }
 
 // Options Page
@@ -77,12 +104,7 @@ function sync_folder_options()
 
   // If "read again" button clicked, calculate the statistics
   if (isset($_GET['read_again']) && $_GET['read_again'] == 'true') {
-    list($total_files_found, $total_matching_files, $total_synced_files) = sync_folder_read_statistics();
-
-    // Save statistics
-    update_option('sync_folder_total_files_found', $total_files_found);
-    update_option('sync_folder_total_matching_files', $total_matching_files);
-    update_option('sync_folder_total_synced_files', $total_synced_files);
+    sync_folder_read_statistics();
   }
 
   // Options Form
@@ -162,45 +184,45 @@ function sync_folder_cron_task()
     }
 
     foreach (glob($folder . '*.{' . $file_types . '}', GLOB_BRACE) as $filename) {
-      // Check if file already exists in the media library
-      $existing_attachment = get_page_by_title(basename($filename), OBJECT, 'attachment');
+      $full_path = $folder . basename($filename);
+      echo $full_path;
+      $existing_attachment = find_attachment_by_url($full_path);
+      $is_variant = is_variant($folder, basename($filename));
 
-      if (!$existing_attachment) {
-        // Get file type
-        $filetype = wp_check_filetype(basename($filename), null);
+      if (!$existing_attachment && !$is_variant) {
+        echo " X<br />";
+        return;
+      }
+      echo " !<br />";
+      // Get file type
+      $filetype = wp_check_filetype(basename($filename), null);
 
-        // Prepare an array of post data for the attachment
-        $attachment = array(
-          'guid'           => $folder . basename($filename),
-          'post_mime_type' => $filetype['type'],
-          'post_title'     => preg_replace('/\.[^.]+$/', '', basename($filename)),
-          'post_content'   => '',
-          'post_status'    => 'inherit',
-          'post_author'    => $author_id
-        );
+      // Prepare an array of post data for the attachment
+      $attachment = array(
+        'guid'           => $folder . basename($filename),
+        'post_mime_type' => $filetype['type'],
+        'post_title'     => preg_replace('/\.[^.]+$/', '', basename($filename)),
+        'post_content'   => '',
+        'post_status'    => 'inherit',
+        'post_author'    => $author_id
+      );
 
-        // Insert the attachment
-        $attach_id = wp_insert_attachment($attachment, $filename);
+      // Insert the attachment
+      $attach_id = wp_insert_attachment($attachment, $filename);
 
-        // If the file is an image, generate attachment metadata
-        if (strpos($filetype['type'], 'image/') === 0) {
-          // Include the image.php file to use wp_generate_attachment_metadata() function
-          require_once(ABSPATH . 'wp-admin/includes/image.php');
+      // If the file is an image, generate attachment metadata
+      if (strpos($filetype['type'], 'image/') === 0) {
+        // Include the image.php file to use wp_generate_attachment_metadata() function
+        require_once(ABSPATH . 'wp-admin/includes/image.php');
 
-          // Generate attachment metadata and update the database record
-          $attach_data = wp_generate_attachment_metadata($attach_id, $filename);
-          wp_update_attachment_metadata($attach_id, $attach_data);
-        }
+        // Generate attachment metadata and update the database record
+        $attach_data = wp_generate_attachment_metadata($attach_id, $filename);
+        wp_update_attachment_metadata($attach_id, $attach_data);
       }
     }
   }
 
-  list($total_files_found, $total_matching_files, $total_synced_files) = sync_folder_read_statistics();
-
-  // Save statistics
-  update_option('sync_folder_total_files_found', $total_files_found);
-  update_option('sync_folder_total_matching_files', $total_matching_files);
-  update_option('sync_folder_total_synced_files', $total_synced_files);
+  sync_folder_read_statistics();
 }
 
 if (!wp_next_scheduled('sync_folder_cron_task')) {
